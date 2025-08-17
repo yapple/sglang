@@ -170,12 +170,14 @@ class StorageOperation:
         token_ids: List[int],
         last_hash: Optional[str] = None,
         hash_value: Optional[List[str]] = None,
+        prefix: List[int] = None,
     ):
         self.host_indices = host_indices
         self.token_ids = token_ids
         self.last_hash = last_hash
         self.completed_tokens = 0
         self.hash_value = hash_value if hash_value is not None else []
+        self.prefix = prefix
 
         self.id = StorageOperation.counter
         StorageOperation.counter += 1
@@ -275,6 +277,13 @@ class HiCacheController:
                 self.storage_backend = HiCacheHF3FS.from_env_config(
                     rank, bytes_per_page, dtype
                 )
+                self.get_hash_str = get_hash_str
+            elif storage_backend == "aibrix":
+                from sglang.srt.mem_cache.storage.aibrix_kvcache.aibrix_kvcache_storage import (
+                    AibrixKVCacheStorage,
+                )
+
+                self.storage_backend = AibrixKVCacheStorage(self.mem_pool_device)
                 self.get_hash_str = get_hash_str
             else:
                 raise NotImplementedError(
@@ -579,6 +588,22 @@ class HiCacheController:
             else:
                 break
 
+    def aibrix_page_transfer(self, operation):
+        prefix = operation.prefix
+        token_ids = operation.token_ids
+        dummy_page_dst = [self.mem_pool_host.get_dummy_flat_data_page()] * len(
+            page_hashes
+        )
+        page_data = self.storage_backend.prefix_get(prefix, token_ids, dummy_page_dst)
+        completed_tokens = operation.completed_tokens
+        if operation.increment(self.page_size * len(page_hashes)):
+            for i in range(len(page_data)):
+                self.mem_pool_host.set_from_flat_data_page(
+                    operation.host_indices[completed_tokens],
+                    page_data[i],
+                )
+                completed_tokens += self.page_size
+
     def mooncake_page_transfer(self, operation):
         key_strs, buffer_ptrs, buffer_sizes = self.mem_pool_host.get_buffer_meta(
             operation.hash_value, operation.host_indices
@@ -589,6 +614,9 @@ class HiCacheController:
     def is_mooncake_backend(self):
         return self.storage_backend_type == "mooncake"
 
+    def is_aibrix_backend(self):
+        return self.storage_backend_type == "aibrix"
+
     def prefetch_io_aux_func(self):
         """
         Auxiliary function conducting IO operations for prefetching.
@@ -596,7 +624,9 @@ class HiCacheController:
         while not self.stop_event.is_set():
             try:
                 operation = self.prefetch_buffer.get(block=True, timeout=1)
-                if self.is_mooncake_backend():
+                if self.is_aibrix_backend():
+                    self.aibrix_page_transfer(operation)
+                elif self.is_mooncake_backend():
                     self.mooncake_page_transfer(operation)
                 elif self.storage_backend_type == "hf3fs":
                     self.generic_page_transfer(operation, batch_size=128)
@@ -708,11 +738,14 @@ class HiCacheController:
         host_indices: torch.Tensor,
         token_ids: List[int],
         hash_value: Optional[List[str]] = None,
+        prefix: List[int] = None,
     ) -> int:
         """
         Write KV caches from host memory to storage backend.
         """
-        operation = StorageOperation(host_indices, token_ids, hash_value=hash_value)
+        operation = StorageOperation(
+            host_indices, token_ids, hash_value=hash_value, prefix=prefix
+        )
         self.backup_queue.put(operation)
         return operation.id
 
@@ -730,6 +763,20 @@ class HiCacheController:
                 logger.warning(f"Failed to write page {page_hashes} to storage.")
                 break
             operation.completed_tokens += self.page_size * len(page_hashes)
+
+    def aibrix_page_backup(self, operation):
+        prefix = operation.prefix
+        token_ids = operation.token_ids
+        page_data = [
+            self.mem_pool_host.get_flat_data_page(
+                operation.host_indices[j * self.page_size]
+            )
+            for j in range(0, len(operation.hash_value))
+        ]
+
+        status = self.storage_backend.prefix_set(prefix, token_ids, page_data)
+        if status:
+            operation.completed_tokens += self.page_size * len(operation.hash_value)
 
     def mooncake_page_backup(self, operation):
         if len(operation.hash_value):
@@ -767,7 +814,9 @@ class HiCacheController:
                 if operation is None:
                     continue
 
-                if self.is_mooncake_backend():
+                if self.is_aibrix_backend():
+                    self.aibrix_page_backup(operation)
+                elif self.is_mooncake_backend():
                     self.mooncake_page_backup(operation)
                 elif self.storage_backend_type == "hf3fs":
                     self.generic_page_backup(operation, batch_size=128)
