@@ -98,6 +98,43 @@ class HiCacheStorage(ABC):
         """
         pass
 
+    @abstractmethod
+    def prefix_get(
+        self,
+        prefix:List[int],
+        token_ids: List[int],
+        target_locations: Optional[Any] = None,
+        target_sizes: Optional[Any] = None,
+    ) -> List[torch.Tensor | None]:
+        """
+        Retrieve values for multiple keys.
+        Returns a list of tensors or None for each key.
+        """
+        pass
+
+    @abstractmethod
+    def prefix_set(
+        self,
+        prefix:List[int],
+        token_ids: List[int],
+        values: Optional[Any] = None,
+        target_locations: Optional[Any] = None,
+        target_sizes: Optional[Any] = None,
+    ) -> bool:
+        """
+        Store multiple key-value pairs.
+        Returns True if all operations were successful, False otherwise.
+        """
+        pass
+
+    @abstractmethod
+    def prefix_exists(self, prefix:List[int], token_ids: List[int]) -> bool | dict:
+        """
+        Check if the key exists in the storage.
+        Returns True if the key exists, False otherwise.
+        """
+        pass
+
 
 class HiCacheFile(HiCacheStorage):
 

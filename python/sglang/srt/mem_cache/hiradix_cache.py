@@ -146,7 +146,7 @@ class HiRadixCache(RadixCache):
 
     def write_backup_storage(self, node: TreeNode):
         operation_id = self.cache_controller.write_storage(
-            node.host_value, node.key, node.hash_value
+            node.host_value, node.key, node.hash_value, node.get_prefix()
         )
         self.ongoing_backup[operation_id] = node
         node.protect_host()
