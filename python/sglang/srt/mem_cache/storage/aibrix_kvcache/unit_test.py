@@ -33,6 +33,7 @@ def setup():
 class AIBrixKVCacheStorgaeTest:
     def test_with_page_size(self):
         for page_size in range(1, 3):
+            print(f"page_size: {page_size}")
             batch_size = 2
             head_num = 1
             # layer_num > 1 : the shape in aibrix has some problem need to resolve
@@ -51,18 +52,28 @@ class AIBrixKVCacheStorgaeTest:
                 layer_num,
             )
             self.aibrix_kvcache = AibrixKVCacheStorage(kv_cache)
-            tokens = [i for i in range(page_size * (batch_size + 1))]
+            tokens = [i for i in range(page_size * (batch_size + 2))]
             prefix = tokens[:page_size]
-            tokens_id = tokens[page_size:]
+            tokens_id = tokens[page_size : page_size * (batch_size + 1)]
+            partial_exist_tokens_id = tokens[page_size : page_size * (batch_size + 2)]
             target_shape = (head_num, 2, page_size, layer_num, head_dim)
-            rand_tensor = [torch.rand(target_shape, dtype=torch.float16)] * batch_size
-            assert self.aibrix_kvcache.prefix_exists(prefix, tokens_id) == False
+            rand_tensor = [
+                torch.rand(target_shape, dtype=torch.float16) for _ in range(batch_size)
+            ]
+            assert self.aibrix_kvcache.prefix_exists(prefix, tokens_id) == 0
             self.aibrix_kvcache.prefix_set(prefix, tokens_id, rand_tensor)
-            get_tensor = [torch.rand(target_shape, dtype=torch.float16)] * batch_size
+            get_tensor = [
+                torch.rand(target_shape, dtype=torch.float16) for _ in range(batch_size)
+            ]
             self.aibrix_kvcache.prefix_get(prefix, tokens_id, get_tensor)
             for i in range(batch_size):
                 assert torch.equal(get_tensor[i], rand_tensor[i])
-            assert self.aibrix_kvcache.prefix_exists(prefix, tokens_id) == True
+            assert self.aibrix_kvcache.prefix_exists(prefix, tokens_id) == len(
+                tokens_id
+            )
+            assert self.aibrix_kvcache.prefix_exists(
+                prefix, partial_exist_tokens_id
+            ) == len(tokens_id)
 
 
 if __name__ == "__main__":

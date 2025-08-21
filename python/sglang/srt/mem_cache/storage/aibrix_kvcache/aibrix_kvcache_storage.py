@@ -73,7 +73,7 @@ class AibrixKVCacheStorage(HiCacheStorage):
             self.block_spec = KVCacheBlockSpec(
                 block_ntokens=self.page_size,
                 block_dtype=self.kv_cache_dtype,
-                block_layout=KVCacheBlockLayout(KVCacheBlockLayout.LCND),
+                block_layout=KVCacheBlockLayout(KVCacheBlockLayout.NCLD),
                 tensor_spec=KVCacheTensorSpec(
                     heads=self.kv_head_ids,
                     layers=self.layer_ids,
@@ -108,7 +108,9 @@ class AibrixKVCacheStorage(HiCacheStorage):
             logger.info(f"target {target_location[0].shape}")
             assert len(kv_blocks) == len(target_location)
             for i in range(len(kv_blocks)):
-                target_location[i].reshape(kv_blocks[i].shape).copy_(kv_blocks[i])
+                target_location[i].reshape(kv_blocks[i].shape).copy_(
+                    kv_blocks[i]
+                ).reshape(target_location[i].shape)
             return target_location
 
         return None
@@ -131,30 +133,38 @@ class AibrixKVCacheStorage(HiCacheStorage):
             return False
         handle = status.value
         tensors = handle.to_tensors()
-        assert len(tensors) == len(values)
+        if len(tensors) != len(values):
+            logger.error("prefix_set allocate not enough")
+            return False
         for i in range(len(tensors)):
-            tensors[i].reshape(values[i].shape).copy_(values[i])
+            tensors[i].reshape(values[i].shape).copy_(values[i]).reshape(
+                tensors[i].shape
+            )
         ids_view = TokenListView(prefix + token_ids)
         status = self.kv_cache_manager.put(
             ids_view[: len(prefix)], ids_view[len(prefix) :], handle
         )
         if not status.is_ok():
-            logger.info("AIBrix KVCache Storage prefix set failed")
+            logger.info(
+                f"AIBrix KVCache Storage prefix set failed, error_code {status.error_code}"
+            )
             return False
-        return True
+        completed = status.value
+        return completed == len(token_ids)
 
-    def prefix_exists(self, prefix: List[int], token_ids: List[int]) -> bool | dict:
+    def prefix_exists(self, prefix: List[int], token_ids: List[int]) -> int:
         """
         Check if the key exists in the storage.
         Returns True if the key exists, False otherwise.
         """
+        assert token_ids != None
         ids_view = TokenListView(prefix + token_ids)
         status = self.kv_cache_manager.exists(
             ids_view[: len(prefix)], ids_view[len(prefix) :]
         )
         if status.is_ok():
-            return status.value > 0
-        return False
+            return status.value
+        return 0
 
     def get(
         self,

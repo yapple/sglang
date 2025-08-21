@@ -193,6 +193,7 @@ class PrefetchOperation(StorageOperation):
         host_indices: torch.Tensor,
         token_ids: List[int],
         last_hash: Optional[str] = None,
+        prefix: List[int] = None,
     ):
         self.request_id = request_id
 
@@ -201,7 +202,7 @@ class PrefetchOperation(StorageOperation):
 
         self.start_time = time.monotonic()
 
-        super().__init__(host_indices, token_ids, last_hash)
+        super().__init__(host_indices, token_ids, last_hash, None, prefix)
 
     def increment(self, num_tokens: int):
         with self._lock:
@@ -550,13 +551,15 @@ class HiCacheController:
         host_indices: torch.Tensor,
         new_input_tokens: List[int],
         last_hash: Optional[str] = None,
+        prefix: List[int] = None,
     ) -> PrefetchOperation:
         """
         Prefetch KV caches from storage backend to host memory.
         """
         operation = PrefetchOperation(
-            request_id, host_indices, new_input_tokens, last_hash
+            request_id, host_indices, new_input_tokens, last_hash, prefix
         )
+        print("prefetch:", prefix)
         self.prefetch_queue.put(operation)
         return operation
 
@@ -684,7 +687,10 @@ class HiCacheController:
                         )
 
                         # todo, more unified interface
-                        if not self.is_mooncake_backend():
+                        if (
+                            not self.is_mooncake_backend()
+                            and not self.is_aibrix_backend()
+                        ):
                             if not self.storage_backend.exists(last_hash):
                                 break
                         hash_value.append(last_hash)
@@ -697,6 +703,11 @@ class HiCacheController:
                         storage_hit_count = (
                             sum(1 for v in exist_result.values() if v != 0)
                             * self.page_size
+                        )
+                    if self.is_aibrix_backend():
+                        # for aibrix
+                        storage_hit_count = self.storage_backend.prefix_exists(
+                            operation.prefix, operation.token_ids
                         )
 
                 if self.tp_world_size > 1:
