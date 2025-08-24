@@ -146,7 +146,7 @@ class HiRadixCache(RadixCache):
 
     def write_backup_storage(self, node: TreeNode):
         operation_id = self.cache_controller.write_storage(
-            node.host_value, node.key, node.hash_value
+            node.host_value, node.key, node.hash_value, node.get_prefix()
         )
         self.ongoing_backup[operation_id] = node
         node.protect_host()
@@ -565,7 +565,11 @@ class HiRadixCache(RadixCache):
             self.evict_host(prefetch_length)
             host_indices = self.cache_controller.mem_pool_host.alloc(prefetch_length)
         operation = self.cache_controller.prefetch(
-            req_id, host_indices, new_input_tokens, last_hash
+            req_id,
+            host_indices,
+            new_input_tokens,
+            last_hash,
+            last_host_node.get_prefix(True),
         )
         self.ongoing_prefetch[req_id] = (
             last_host_node,

@@ -92,6 +92,16 @@ class TreeNode:
             return None
         return self.hash_value[-1]
 
+    def get_prefix(self, with_cur: bool = False) -> List[int]:
+        """Returns the prefix of the node key."""
+        ret = []
+        if with_cur:
+            ret.extend(self.key[::-1])
+        while self.parent is not None:
+            self = self.parent
+            ret.extend(self.key[::-1])
+        return ret[::-1]
+
     def __lt__(self, other: "TreeNode"):
         return self.last_access_time < other.last_access_time
 
