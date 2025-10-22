@@ -37,39 +37,53 @@ def setup():
 
 
 class AIBrixKVCacheStorageTest:
-    def test_with_page_size(self):
-        config = HiCacheStorageConfig(
+    def __init__(self):
+        self.config = HiCacheStorageConfig(
             tp_rank=0,
             tp_size=1,
             is_mla_model=False,
             is_page_first_layout=True,
             model_name="test",
         )
+        self.head_num = 1
+        self.layer_num = 64
+        self.head_dim = 128
+
+    def init_aibrix_kv_cache_storage(self, page_size: int):
+        logger.info(f"page_size: {page_size}")
+        self.page_size = page_size
+        self.mem_pool = MHATokenToKVPool(
+            1024,
+            page_size,
+            torch.float16,
+            self.head_num,
+            self.head_dim,
+            self.layer_num,
+            "cpu",
+            False,
+            0,
+            self.layer_num,
+        )
+        self.mem_pool_host = MHATokenToKVPoolHost(
+            self.mem_pool, 2, 0, page_size, "page_first"
+        )
+        self.aibrix_kvcache = AibrixKVCacheStorage(self.config, self.mem_pool_host)
+        self.target_shape = (
+            2,
+            self.layer_num,
+            self.page_size,
+            self.head_num,
+            self.head_dim,
+        )
+
+    def test_with_page_size(self):
         for page_size in range(1, 3):
-            logger.info(f"page_size: {page_size}")
+            self.init_aibrix_kv_cache_storage(page_size)
             batch_size = 2
-            head_num = 1
-            layer_num = 64
-            head_dim = 128
-            kv_cache = MHATokenToKVPool(
-                1024,
-                page_size,
-                torch.float16,
-                head_num,
-                head_dim,
-                layer_num,
-                "cpu",
-                False,
-                0,
-                layer_num,
-            )
-            mem_pool = MHATokenToKVPoolHost(kv_cache, 2, 0, page_size, "layer_first")
             query_length = batch_size * 2
             partial = batch_size
-            self.aibrix_kvcache = AibrixKVCacheStorage(config, mem_pool)
-            target_shape = (2, layer_num, page_size, head_num, head_dim)
             rand_tensor = [
-                torch.rand(target_shape, dtype=torch.float16)
+                torch.rand(self.target_shape, dtype=torch.float16)
                 for _ in range(query_length)
             ]
             keys = ["hash" + str(i) for i in range(query_length)]
@@ -77,7 +91,7 @@ class AIBrixKVCacheStorageTest:
             assert self.aibrix_kvcache.batch_exists(keys) == 0
             assert self.aibrix_kvcache.batch_set(keys, rand_tensor)
             get_tensor = [
-                torch.rand(target_shape, dtype=torch.float16).flatten()
+                torch.rand(self.target_shape, dtype=torch.float16).flatten()
                 for _ in range(query_length)
             ]
             self.aibrix_kvcache.batch_get(keys, get_tensor)
@@ -87,7 +101,7 @@ class AIBrixKVCacheStorageTest:
             assert self.aibrix_kvcache.batch_exists(keys) == query_length
             assert self.aibrix_kvcache.batch_exists(partial_keys) == partial
             partial_get_tensor = [
-                torch.rand(target_shape, dtype=torch.float16).flatten()
+                torch.rand(self.target_shape, dtype=torch.float16).flatten()
                 for _ in range(partial)
             ]
             self.aibrix_kvcache.batch_get(partial_keys, partial_get_tensor)
@@ -102,8 +116,18 @@ class AIBrixKVCacheStorageTest:
                 1,
             )
 
+    def test_external_memory_region(self):
+        self.init_aibrix_kv_cache_storage(page_size=16)
+        tokens = self.page_size * 2
+        keys = [f"key{i}" for i in range(0, tokens // self.page_size)]
+        host_indices = self.mem_pool_host.alloc(tokens)
+        assert host_indices != None, "alloc host indices failed"
+        logger.info(host_indices)
+        self.aibrix_kvcache.batch_set_v1(keys, host_indices)
+
 
 if __name__ == "__main__":
     setup()
     test = AIBrixKVCacheStorageTest()
     test.test_with_page_size()
+    test.test_external_memory_region()

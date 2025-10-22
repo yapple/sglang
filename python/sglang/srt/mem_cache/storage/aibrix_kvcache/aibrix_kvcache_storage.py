@@ -5,30 +5,42 @@ import torch
 from aibrix_kvcache import (
     BaseKVCacheManager,
     BlockHashes,
+    ExternalMemoryRegion,
     KVCacheBlockLayout,
     KVCacheBlockSpec,
     KVCacheConfig,
     KVCacheTensorSpec,
+    MemoryRegionKVCacheHandle,
     ModelSpec,
 )
 from aibrix_kvcache.common.absl_logging import log_every_n_seconds
 
-from sglang.srt.mem_cache.hicache_storage import HiCacheStorage, HiCacheStorageConfig
+from sglang.srt.mem_cache.hicache_storage import (
+    HiCacheStorage,
+    HiCacheStorageConfig,
+    HiCacheStorageExtraInfo,
+)
 from sglang.srt.mem_cache.memory_pool_host import HostKVCache
 
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
 
 
 class AibrixKVCacheStorage(HiCacheStorage):
-    def __init__(self, storage_config: HiCacheStorageConfig, mem_pool: HostKVCache):
+    def __init__(
+        self, storage_config: HiCacheStorageConfig, mem_pool_host: HostKVCache
+    ):
         if storage_config is not None:
             self.is_mla_backend = storage_config.is_mla_model
             self.local_rank = storage_config.tp_rank
         else:
             self.is_mla_backend = False
             self.local_rank = 0
-        kv_cache = mem_pool.device_pool
-        self.page_size = mem_pool.page_size
+        self.mem_pool_host = mem_pool_host
+        kv_cache = mem_pool_host.device_pool
+        self.page_size = mem_pool_host.page_size
         self.kv_cache_dtype = kv_cache.dtype
         self.layer_num = kv_cache.layer_num
         self.kv_head_ids = [
@@ -58,6 +70,8 @@ class AibrixKVCacheStorage(HiCacheStorage):
             raise NotImplementedError(
                 "MLA is not supported by AibrixKVCacheStorage yet."
             )
+        self.is_zero_copy = self.mem_pool_host.layout == "page_first"
+        logger.info(f"{self.is_zero_copy=}")
 
     def _aibrix_kvcache_metrics_report(self):
         self.kv_cache_manager.metrics.summary()
@@ -84,6 +98,7 @@ class AibrixKVCacheStorage(HiCacheStorage):
                 ), f"{target_locations[i].nbytes}, {kv_blocks[i].nbytes}"
                 target_locations[i].copy_(kv_blocks[i].flatten())
             handle.release()
+            logger.debug(f"batch_get success {keys}")
             return target_locations
 
         return [None] * len(keys)
@@ -149,3 +164,40 @@ class AibrixKVCacheStorage(HiCacheStorage):
 
     def exists(self, key: str) -> bool | dict:
         return self.batch_exists([key]) > 0
+
+    def _batch_set(self, keys, host_indices):
+        # create ExternalMemoryRegion
+        logger.info(len(host_indices))
+        page_num = len(host_indices) // self.page_size
+        logger.info(len(host_indices))
+        select = [(0, host_indices[i * self.page_size]) for i in range(page_num)]
+        handle = MemoryRegionKVCacheHandle.create(
+            self.mem_pool_host.kv_buffer, self.block_spec, select
+        )
+        assert handle != None, "AIBrix KVCache create MemoryRegionKVCacheHandle failed"
+        block_hash = BlockHashes(keys, self.page_size)
+        self.kv_cache_manager.put(None, block_hash, handle)
+
+        return None
+
+    def _batch_set_preprocess(self, keys, host_indices):
+        page_num = len(host_indices) // self.mem_pool_host.page_size
+        flat = not self.is_zero_copy
+        values = [
+            self.mem_pool_host.get_data_page(host_indices[i * page_num], flat=flat)
+            for i in range(page_num)
+        ]
+        # TODO for zero copy split values to K and V
+        return keys, values
+
+    def batch_set_v1(
+        self,
+        keys: List[str],
+        host_indices: torch.Tensor,
+        extra_info: Optional[HiCacheStorageExtraInfo] = None,
+    ) -> List[bool]:
+        len_keys = len(keys)
+        keys, values = self._batch_set_preprocess(keys, host_indices)
+        logger.info(host_indices, keys, values)
+        results = self._batch_set(keys, host_indices)
+        return results
